@@ -9,20 +9,18 @@ class TCPPacket:
         self.data = data
 
     def pack(self):
-        # header is 16 bytes: seq(4), ack(4), flags(2), win(2), check(2), urg(2)
-        # flags field also includes the data offset (4 words = 16 bytes)
-        # offset 4 shifted left by 12 bits
-        offset_flags = (4 << 12) | self.flags
+        # Header consists of 16 bytes: seq(4), ack(4), flags(2), win(2), check(2), urg(2) (20 bytes - 32 bits from the instruction assignment)
+        offset_flags = (4 << 12) | self.flags  # offset 4 shifted left by 12 bits
 
         header = struct.pack(
             "!IIHHHH",
             self.seq,
             self.ack,
             offset_flags,
-            4096,  # window
-            0,  # checksum
+            4096,
             0,
-        )  # urgent pointer
+            0,
+        )
         return header + self.data
 
     @staticmethod
@@ -33,15 +31,15 @@ class TCPPacket:
         header = data[:16]
         payload = data[16:]
 
-        # ignore the last 3 values (window, check, urg)
+        # Ignore the last 3 values
         seq, ack, flags_raw, _, _, _ = struct.unpack("!IIHHHH", header)
 
-        # mask out the offset to get just the flags
+        # Mask out the offset -> from the pack method
         flags = flags_raw & 0x3F
 
         return TCPPacket(seq, ack, flags, payload)
 
-    # Helper checks
+    # Helpers
     @property
     def is_syn(self):
         return (self.flags & 0x02) != 0

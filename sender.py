@@ -33,23 +33,23 @@ def main():
         file_data = f.read()
 
     total_bytes = len(file_data)
-    print(f"Sending {filename} ({total_bytes} bytes) to {dest_ip}...")
+    print(f"Sending {filename} ({total_bytes} bytes) to {dest_ip}.")
 
     # Sequence tracking
     seq = 0  # My sequence number
     server_seq = 0  # What the server is at
 
-    # --- Handshake ---
+    # Handshake
     connected = False
     while not connected:
         try:
             # Send SYN
-            syn = TCPPacket(seq, 0, 2)  # 2 = SYN
+            syn = TCPPacket(seq, 0, 2)  # SYN flag 2
             sock.sendto(syn.pack(), (dest_ip, dest_port))
 
             # Wait for SYN-ACK (longer timeout for handshake)
             sock.settimeout(1.0)
-            raw, addr = sock.recvfrom(1024)
+            raw, _ = sock.recvfrom(1024)
             resp = TCPPacket.unpack(raw)
 
             if resp and resp.is_syn and resp.is_ack:
@@ -57,24 +57,24 @@ def main():
                 server_seq = resp.seq + 1
 
                 # Send ACK
-                ack = TCPPacket(seq, server_seq, 16)  # 16 = ACK
+                ack = TCPPacket(seq, server_seq, 16)  # ACK flag 16
                 sock.sendto(ack.pack(), (dest_ip, dest_port))
+
                 print("Connected!")
                 connected = True
-                sock.settimeout(0.01)  # Restore short timeout
+                sock.settimeout(0.05)  # Restore short timeout
 
         except socket.timeout:
-            print("Handshake timeout, retrying...")
+            print("Handshake timeout, retrying.")
 
-    # --- Transfer Loop (GBN) ---
+    # GBN Loop
     base = seq  # oldest unacked byte
     next_seq = seq  # next byte to send
-    initial_seq = seq  # kept purely for offset calculation
+    initial_seq = seq  # offset calculation
 
-    start_time = None  # Timer for the base packet
+    start_time = None  # Timer to count base packet timeout
 
     while base < (initial_seq + total_bytes):
-
         # 1. Send packets if window allows
         while next_seq < base + WINDOW_SIZE and next_seq < initial_seq + total_bytes:
             offset = next_seq - initial_seq
@@ -90,12 +90,11 @@ def main():
 
         # 2. Receive ACKs
         try:
-            raw, addr = sock.recvfrom(1024)
+            raw, _ = sock.recvfrom(1024)
             ack_pkt = TCPPacket.unpack(raw)
 
             if ack_pkt and ack_pkt.is_ack:
-                if ack_pkt.ack > base:
-                    # Cumulative ACK - slide window
+                if ack_pkt.ack > base:  # Cumulative ACK
                     base = ack_pkt.ack
 
                     if base == next_seq:
@@ -104,14 +103,14 @@ def main():
                         start_time = time.time()  # Restart timer
 
         except socket.timeout:
-            pass  # Just checking the timer
+            pass  # TODO: Handle this
 
         # 3. Check Timeout
         if start_time and (time.time() - start_time > TIMEOUT):
             print(f"Timeout on seq {base}. Retransmitting window.")
             start_time = time.time()
 
-            # GBN: Go back to base and resend everything up to next_seq
+            # GBN -> Resend
             curr = base
             while curr < next_seq:
                 offset = curr - initial_seq
@@ -123,33 +122,33 @@ def main():
 
     print("File data sent.")
 
-    # --- Teardown ---
+    # Connection closing
     fin_acked = False
     attempts = 0
-    sock.settimeout(1.0)  # Relaxed timeout for FINs
+    sock.settimeout(1.0)  # Timeout longer for FINs
 
     while not fin_acked and attempts < 10:
         try:
             # Send FIN
-            fin = TCPPacket(base, server_seq, 1)  # 1 = FIN
+            fin = TCPPacket(base, server_seq, 1)  # FIN flag 1
             sock.sendto(fin.pack(), (dest_ip, dest_port))
 
-            raw, addr = sock.recvfrom(1024)
+            raw, _ = sock.recvfrom(1024)
             resp = TCPPacket.unpack(raw)
 
             if resp.is_ack and resp.ack == base + 1:
                 fin_acked = True
 
             if resp.is_fin:
-                # Ack the server's FIN
                 server_seq = resp.seq + 1
                 final_ack = TCPPacket(base + 1, server_seq, 16)
                 sock.sendto(final_ack.pack(), (dest_ip, dest_port))
+
                 print("Connection closed.")
 
         except socket.timeout:
             attempts += 1
-            print("Closing...")
+            print("Closing timeout, retrying.")
 
     sock.close()
 

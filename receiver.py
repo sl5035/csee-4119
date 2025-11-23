@@ -20,14 +20,14 @@ def main():
     server_seq = 200
     expected_seq = 0
 
-    # State: 0=Wait for SYN, 1=Connected, 2=Closing
+    # State -> Wait for SYN: 0, Connected: 1, Closing: 2
     state = 0
 
-    # Prepare file handle
+    # File handling
     try:
         outfile = open(filename, "wb")
     except IOError:
-        print(f"Error: cannot open {filename} for writing")
+        print(f"Error: cannot open {filename} for writing.")
         return
 
     while True:
@@ -39,11 +39,11 @@ def main():
 
             # 1. Handle Handshake (SYN)
             if state == 0 and pkt.is_syn:
-                print(f"Received connection request from {addr}")
+                print(f"Received connection request from {addr}.")
                 expected_seq = pkt.seq + 1
 
                 # Send SYN-ACK
-                reply = TCPPacket(server_seq, expected_seq, 18)  # 18 = SYN|ACK
+                reply = TCPPacket(server_seq, expected_seq, 18)  # SYN | ACK = 18
                 sock.sendto(reply.pack(), addr)
                 server_seq += 1
 
@@ -53,18 +53,16 @@ def main():
 
             # 2. Handle Data
             elif state == 1 and len(pkt.data) > 0:
-                if pkt.seq == expected_seq:
-                    # Correct packet, write to disk
+                if pkt.seq == expected_seq:  # Correct packet -> write to disk
                     outfile.write(pkt.data)
-                    outfile.flush()  # make sure it saves
+                    outfile.flush()
                     expected_seq += len(pkt.data)
                 else:
-                    # Out of order or duplicate
-                    # print(f"Gap detected: got {pkt.seq}, need {expected_seq}")
+                    print(f"Gap detected: got {pkt.seq}, need {expected_seq}.")
                     pass
 
-                # Always send ACK for what we expect next (Cumulative ACK)
-                ack = TCPPacket(server_seq, expected_seq, 16)  # 16 = ACK
+                # Always send ACK (Cumulative ACK)
+                ack = TCPPacket(server_seq, expected_seq, 16)  # ACK flag is 16
                 sock.sendto(ack.pack(), addr)
 
             # 3. Handle Teardown (FIN)
@@ -75,11 +73,11 @@ def main():
                 expected_seq = pkt.seq + 1
 
                 # Send ACK for the FIN
-                ack = TCPPacket(server_seq, expected_seq, 16)
+                ack = TCPPacket(server_seq, expected_seq, 16)  # ACK flag is 16
                 sock.sendto(ack.pack(), addr)
 
-                # Send our own FIN
-                fin = TCPPacket(server_seq, expected_seq, 17)  # FIN|ACK
+                # Send FIN
+                fin = TCPPacket(server_seq, expected_seq, 17)  # FIN | ACK = 17
                 sock.sendto(fin.pack(), addr)
                 server_seq += 1
                 state = 2
@@ -87,12 +85,11 @@ def main():
             # Final ACK wait
             elif state == 2 and pkt.is_ack:
                 print("Connection closed cleanly.")
-                # Reset for next client? Or just exit.
-                # For this assignment, we can probably just exit or reset.
+
                 state = 0
                 server_seq = 200
-                # Re-open file for next run if needed, or just break
-                break
+
+                break  # TODO: handle this break?
 
         except Exception as e:
             print(f"Error: {e}")
