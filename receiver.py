@@ -44,7 +44,9 @@ def run_receiver():
 
                     # Update Expected Sequence
                     expected_seq += len(packet.data)
-                    # print(f"Received Seq={packet.seq_num} (Correct). Next needed={expected_seq}")
+                    print(
+                        f"Received Seq={packet.seq_num} (Correct). Next needed={expected_seq}"
+                    )
                 else:
                     print(
                         f"Out of order! Got {packet.seq_num}, Expected {expected_seq}"

@@ -84,7 +84,7 @@ def run_sender():
             )
 
             sock.sendto(pkt.to_bytes(), (target_ip, target_port))
-            # print(f"Sent Seq={next_seq_num} Len={len(chunk)}")
+            print(f"Sent Seq={next_seq_num} Len={len(chunk)}")
 
             # Advance next_seq_num
             next_seq_num += len(chunk)
@@ -99,7 +99,7 @@ def run_sender():
             if ack_pkt.is_ack:
                 # Cumulative ACK check
                 if ack_pkt.ack_num > send_base:
-                    # print(f"Got ACK={ack_pkt.ack_num}. Sliding Window.")
+                    print(f"Got ACK={ack_pkt.ack_num}. Sliding Window.")
                     send_base = ack_pkt.ack_num
 
         except socket.timeout:
