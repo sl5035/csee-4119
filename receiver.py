@@ -1,32 +1,57 @@
 import socket
+import sys
+from tcp_packet import TCPPacket
 
 
 def run_receiver():
-    # Standard UDP setup
-    # AF_INET = IPv4, SOCK_DGRAM = UDP
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("0.0.0.0", 8080))
+    print("Receiver listening on 8080...")
 
-    # Bind to all interfaces on port 8080
-    # In Mininet, h2 usually has IP 10.0.0.2
-    server_address = ("0.0.0.0", 8080)
-    print(f"Receiver listening on port 8080...")
-    sock.bind(server_address)
+    # Initial Sequence Number for the receiver
+    server_seq = 200
+    expected_seq = 0  # Will be set upon first SYN
+
+    # State tracking
+    connection_established = False
 
     while True:
         try:
-            # Receive data (buffer size 4096 is plenty for this test)
-            data, address = sock.recvfrom(4096)
+            data, addr = sock.recvfrom(1024 + 16)
+            packet = TCPPacket.from_bytes(data)
 
-            if data:
-                message = data.decode("utf-8")
-                print(f"Received: '{message}' from {address}")
+            if not packet:
+                continue
 
-                # Echo the data back to the sender to test bidirectional traffic
-                reply = f"ACK: {message}"
-                sock.sendto(reply.encode("utf-8"), address)
+            print(f"Received: {packet} from {addr}")
+
+            # Handshake Step 1: Handle SYN
+            if packet.is_syn and not packet.is_ack:
+                print(" -> Got SYN. Sending SYN/ACK...")
+
+                # We expect the next packet to have seq + 1
+                expected_seq = packet.seq_num + 1
+
+                # Create SYN/ACK
+                # Ack Num = Received Seq + 1
+                # Seq Num = Server's own sequence number
+                # Flags = SYN (2) | ACK (16) = 18
+                reply = TCPPacket(
+                    seq_num=server_seq, ack_num=packet.seq_num + 1, flags=18
+                )
+
+                sock.sendto(reply.to_bytes(), addr)
+
+            # Handshake Step 3: Handle ACK
+            elif packet.is_ack and not packet.is_syn:
+                if packet.ack_num == server_seq + 1:
+                    if not connection_established:
+                        print(" -> Got ACK. Connection ESTABLISHED!")
+                        connection_established = True
+                    else:
+                        print(" -> Got duplicate ACK (Already established).")
 
         except KeyboardInterrupt:
-            print("\nShutting down receiver.")
             break
         except Exception as e:
             print(f"Error: {e}")

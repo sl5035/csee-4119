@@ -1,59 +1,63 @@
 import socket
-import time
 import sys
+import time
+from tcp_packet import TCPPacket
 
 
 def run_sender():
-    # Usage: python3 sender.py [target_ip]
-    # Default to 10.0.0.2 (h2) if not provided
     target_ip = sys.argv[1] if len(sys.argv) > 1 else "10.0.0.2"
     target_port = 8080
-
-    # Create UDP socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(2.0)  # 2s timeout (just above RTT)
 
-    # CRITICAL: Set a timeout.
-    # Your link delay is 800ms one-way, so Round Trip Time (RTT) is ~1.6 seconds.
-    # We set timeout to 3.0 seconds. If we don't get a reply by then,
-    # we assume the packet was lost due to the 'loss=15' parameter.
-    sock.settimeout(3.0)
+    # Initial Sequence Number
+    client_seq = 100
 
-    print(f"Sending to {target_ip}:{target_port}")
-    print("Press Ctrl+C to stop manually.\n")
+    # Handshake State
+    handshake_done = False
 
-    seq_num = 0
+    print(f"Starting 3-Way Handshake with {target_ip}...")
 
-    try:
-        while True:
-            message = f"Ping {seq_num}"
-            start_time = time.time()
+    while not handshake_done:
+        try:
+            # 1. Send SYN
+            # Flags = SYN (2)
+            syn_pkt = TCPPacket(seq_num=client_seq, ack_num=0, flags=2)
+            print(f"Sending SYN (Seq={client_seq})...")
+            sock.sendto(syn_pkt.to_bytes(), (target_ip, target_port))
 
-            try:
-                # Send data
-                print(f"Sending '{message}'...")
-                sock.sendto(message.encode("utf-8"), (target_ip, target_port))
+            # 2. Wait for SYN/ACK
+            data, addr = sock.recvfrom(1024)
+            response = TCPPacket.from_bytes(data)
 
-                # Wait for response (Blocking call with timeout)
-                data, server = sock.recvfrom(4096)
-                end_time = time.time()
+            if response.is_syn and response.is_ack:
+                print(f"Received SYN/ACK: {response}")
 
-                # Calculate RTT
-                rtt = end_time - start_time
-                print(f"Success! Got '{data.decode('utf-8')}' | RTT: {rtt:.4f} seconds")
+                if response.ack_num == client_seq + 1:
+                    # 3. Send ACK
+                    # Seq = client_seq + 1 (technically we consumed the SYN)
+                    # Ack = received_seq + 1
+                    # Flags = ACK (16)
+                    ack_pkt = TCPPacket(
+                        seq_num=client_seq + 1, ack_num=response.seq_num + 1, flags=16
+                    )
 
-            except socket.timeout:
-                # This block runs if the packet was dropped (15% chance)
-                print(f"TIMEOUT! Packet '{message}' lost or delayed too long.")
+                    print(
+                        f"Sending ACK (Seq={ack_pkt.seq_num}, Ack={ack_pkt.ack_num})..."
+                    )
+                    sock.sendto(ack_pkt.to_bytes(), (target_ip, target_port))
 
-            seq_num += 1
+                    print("\nConnection ESTABLISHED!")
+                    handshake_done = True
+                else:
+                    print("Error: Invalid Ack Number received.")
 
-            # Wait a bit before sending the next one
-            time.sleep(1)
+        except socket.timeout:
+            print("Timeout! Retrying handshake...")
+        except Exception as e:
+            print(f"Error: {e}")
 
-    except KeyboardInterrupt:
-        print("\nStopping sender.")
-    finally:
-        sock.close()
+    sock.close()
 
 
 if __name__ == "__main__":
