@@ -8,15 +8,14 @@ def run_receiver():
     print("Receiver listening on 8080...")
 
     server_seq = 200
-
-    # We will write incoming data here
     output_file = open("received.bin", "wb")
 
+    # State tracking
     state = 0  # 0=Listen, 1=Established, 2=Closing
+    expected_seq = 0
 
     while True:
         try:
-            # Buffer increased to accommodate MSS + Header
             data, addr = sock.recvfrom(2048)
             packet = TCPPacket.from_bytes(data)
             if not packet:
@@ -25,49 +24,60 @@ def run_receiver():
             # --- HANDSHAKE ---
             if state == 0 and packet.is_syn:
                 print(" -> Got SYN.")
-                reply = TCPPacket(
-                    seq_num=server_seq, ack_num=packet.seq_num + 1, flags=18
-                )
+                expected_seq = packet.seq_num + 1
+                reply = TCPPacket(seq_num=server_seq, ack_num=expected_seq, flags=18)
                 sock.sendto(reply.to_bytes(), addr)
                 server_seq += 1
 
             elif state == 0 and packet.is_ack:
-                print(" -> Connection ESTABLISHED. Waiting for file...")
+                print(" -> Connection ESTABLISHED.")
                 state = 1
 
-            # --- DATA PHASE ---
+            # --- DATA PHASE (WITH ACKS) ---
             elif state == 1 and len(packet.data) > 0:
-                # In Step 4 (No ACKs), we just blindly write the data
-                # Ideally, we would check packet.seq_num here to ensure order
-                output_file.write(packet.data)
-                output_file.flush()  # Ensure it hits the disk
 
-                # We do NOT send an ACK here for Step 4
+                # Check if this is the packet we are waiting for
+                if packet.seq_num == expected_seq:
+                    # Write Data
+                    output_file.write(packet.data)
+                    output_file.flush()
+
+                    # Update Expected Sequence
+                    expected_seq += len(packet.data)
+                    # print(f"Received Seq={packet.seq_num} (Correct). Next needed={expected_seq}")
+                else:
+                    print(
+                        f"Out of order! Got {packet.seq_num}, Expected {expected_seq}"
+                    )
+
+                # Send ACK (Cumulative)
+                # We always ACK the *next expected byte*
+                ack_reply = TCPPacket(
+                    seq_num=server_seq, ack_num=expected_seq, flags=16
+                )
+                sock.sendto(ack_reply.to_bytes(), addr)
 
             # --- TEARDOWN ---
             elif state == 1 and packet.is_fin:
-                print(f" -> Got FIN. Saving file and closing.")
-                output_file.close()  # Close the file
+                print(f" -> Got FIN. Saving and closing.")
+                output_file.close()
 
-                # Send ACK
-                ack_pkt = TCPPacket(
-                    seq_num=server_seq, ack_num=packet.seq_num + 1, flags=16
-                )
+                # Update expected seq to account for FIN consuming 1 byte
+                expected_seq = packet.seq_num + 1
+
+                ack_pkt = TCPPacket(seq_num=server_seq, ack_num=expected_seq, flags=16)
                 sock.sendto(ack_pkt.to_bytes(), addr)
 
-                # Send FIN
-                fin_pkt = TCPPacket(
-                    seq_num=server_seq, ack_num=packet.seq_num + 1, flags=17
-                )
+                fin_pkt = TCPPacket(seq_num=server_seq, ack_num=expected_seq, flags=17)
                 sock.sendto(fin_pkt.to_bytes(), addr)
-                server_seq += 1
                 state = 2
 
             elif state == 2 and packet.is_ack:
                 print(" -> CLOSED.")
                 state = 0
                 server_seq = 200
-                output_file = open("received.bin", "wb")  # Reset for next run
+                expected_seq = 0
+                output_file = open("received.bin", "wb")
 
         except Exception as e:
             print(f"Error: {e}")
