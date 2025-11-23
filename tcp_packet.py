@@ -2,48 +2,46 @@ import struct
 
 
 class TCPPacket:
-    def __init__(self, seq_num=0, ack_num=0, flags=0, data=b""):
-        self.seq_num = seq_num
-        self.ack_num = ack_num
+    def __init__(self, seq=0, ack=0, flags=0, data=b""):
+        self.seq = seq
+        self.ack = ack
         self.flags = flags
-        self.window = 1024 * 4
-        self.checksum = 0
-        self.urg_ptr = 0
         self.data = data
 
-    @staticmethod
-    def create_header(seq_num, ack_num, flags):
-        # Header Length (Data Offset) is 4 words (16 bytes)
-        # Shift 12 bits left
-        data_offset = 4 << 12
-        flags_field = data_offset | flags
+    def pack(self):
+        # header is 16 bytes: seq(4), ack(4), flags(2), win(2), check(2), urg(2)
+        # flags field also includes the data offset (4 words = 16 bytes)
+        # offset 4 shifted left by 12 bits
+        offset_flags = (4 << 12) | self.flags
 
-        # Pack !IIHHHH (Network byte order)
-        header = struct.pack("!IIHHHH", seq_num, ack_num, flags_field, 4096, 0, 0)
-        return header
-
-    def to_bytes(self):
-        header = self.create_header(self.seq_num, self.ack_num, self.flags)
+        header = struct.pack(
+            "!IIHHHH",
+            self.seq,
+            self.ack,
+            offset_flags,
+            4096,  # window
+            0,  # checksum
+            0,
+        )  # urgent pointer
         return header + self.data
 
     @staticmethod
-    def from_bytes(packet_data):
-        if len(packet_data) < 16:
+    def unpack(data):
+        if len(data) < 16:
             return None
 
-        header_data = packet_data[:16]
-        payload = packet_data[16:]
+        header = data[:16]
+        payload = data[16:]
 
-        unpacked = struct.unpack("!IIHHHH", header_data)
+        # ignore the last 3 values (window, check, urg)
+        seq, ack, flags_raw, _, _, _ = struct.unpack("!IIHHHH", header)
 
-        seq_num = unpacked[0]
-        ack_num = unpacked[1]
-        flags_field = unpacked[2]
-        flags = flags_field & 0x3F
+        # mask out the offset to get just the flags
+        flags = flags_raw & 0x3F
 
-        return TCPPacket(seq_num, ack_num, flags, payload)
+        return TCPPacket(seq, ack, flags, payload)
 
-    # Flag Helpers
+    # Helper checks
     @property
     def is_syn(self):
         return (self.flags & 0x02) != 0
@@ -55,13 +53,3 @@ class TCPPacket:
     @property
     def is_fin(self):
         return (self.flags & 0x01) != 0
-
-    def __str__(self):
-        flags_str = []
-        if self.is_syn:
-            flags_str.append("SYN")
-        if self.is_ack:
-            flags_str.append("ACK")
-        if self.is_fin:
-            flags_str.append("FIN")
-        return f"Seq={self.seq_num} Ack={self.ack_num} Flags={','.join(flags_str)}"

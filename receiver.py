@@ -1,92 +1,105 @@
 import socket
+import sys
 from tcp_packet import TCPPacket
 
 
-def run_receiver():
+def main():
+    if len(sys.argv) != 2:
+        print("Usage: python receiver.py <filename>")
+        return
+
+    filename = sys.argv[1]
+    ip = "0.0.0.0"
+    port = 8080
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("0.0.0.0", 8080))
-    print("Receiver listening on 8080...")
+    sock.bind((ip, port))
+    print(f"Listening on {port}.")
 
+    # Initial Sequence Numbers
     server_seq = 200
-    output_file = open("received.bin", "wb")
-
-    state = 0  # 0=Listen, 1=Established, 2=Closing
     expected_seq = 0
+
+    # State: 0=Wait for SYN, 1=Connected, 2=Closing
+    state = 0
+
+    # Prepare file handle
+    try:
+        outfile = open(filename, "wb")
+    except IOError:
+        print(f"Error: cannot open {filename} for writing")
+        return
 
     while True:
         try:
-            data, addr = sock.recvfrom(2048)
-            packet = TCPPacket.from_bytes(data)
-            if not packet:
+            data, addr = sock.recvfrom(4096)
+            pkt = TCPPacket.unpack(data)
+            if not pkt:
                 continue
 
-            # --- HANDSHAKE ---
-            if state == 0 and packet.is_syn:
-                print(" -> Got SYN.")
-                expected_seq = packet.seq_num + 1
-                reply = TCPPacket(seq_num=server_seq, ack_num=expected_seq, flags=18)
-                sock.sendto(reply.to_bytes(), addr)
+            # 1. Handle Handshake (SYN)
+            if state == 0 and pkt.is_syn:
+                print(f"Received connection request from {addr}")
+                expected_seq = pkt.seq + 1
+
+                # Send SYN-ACK
+                reply = TCPPacket(server_seq, expected_seq, 18)  # 18 = SYN|ACK
+                sock.sendto(reply.pack(), addr)
                 server_seq += 1
 
-            elif state == 0 and packet.is_ack:
-                print(" -> Connection ESTABLISHED.")
+            elif state == 0 and pkt.is_ack and pkt.ack == server_seq:
+                print("Connection established.")
                 state = 1
 
-            # --- DATA PHASE (GBN) ---
-            elif state == 1 and len(packet.data) > 0:
-
-                if packet.seq_num == expected_seq:
-                    # Correct Packet: Write and Advance
-                    output_file.write(packet.data)
-                    output_file.flush()
-                    expected_seq += len(packet.data)
-
-                    # ACK the next expected byte
-                    ack_reply = TCPPacket(
-                        seq_num=server_seq, ack_num=expected_seq, flags=16
-                    )
-                    sock.sendto(ack_reply.to_bytes(), addr)
-
-                elif packet.seq_num < expected_seq:
-                    # Duplicate (Old) Packet: Just ACK expected_seq again
-                    ack_reply = TCPPacket(
-                        seq_num=server_seq, ack_num=expected_seq, flags=16
-                    )
-                    sock.sendto(ack_reply.to_bytes(), addr)
-
+            # 2. Handle Data
+            elif state == 1 and len(pkt.data) > 0:
+                if pkt.seq == expected_seq:
+                    # Correct packet, write to disk
+                    outfile.write(pkt.data)
+                    outfile.flush()  # make sure it saves
+                    expected_seq += len(pkt.data)
                 else:
-                    # Out-of-Order Packet (Gap detected)
-                    # GBN logic: Discard packet, re-send ACK for expected_seq
-                    print(
-                        f"Gap! Got {packet.seq_num}, Need {expected_seq}. Discarding."
-                    )
-                    ack_reply = TCPPacket(
-                        seq_num=server_seq, ack_num=expected_seq, flags=16
-                    )
-                    sock.sendto(ack_reply.to_bytes(), addr)
+                    # Out of order or duplicate
+                    # print(f"Gap detected: got {pkt.seq}, need {expected_seq}")
+                    pass
 
-            # --- TEARDOWN ---
-            elif state == 1 and packet.is_fin:
-                print(f" -> Got FIN. Saving and closing.")
-                output_file.close()
-                expected_seq = packet.seq_num + 1
+                # Always send ACK for what we expect next (Cumulative ACK)
+                ack = TCPPacket(server_seq, expected_seq, 16)  # 16 = ACK
+                sock.sendto(ack.pack(), addr)
 
-                ack_pkt = TCPPacket(seq_num=server_seq, ack_num=expected_seq, flags=16)
-                sock.sendto(ack_pkt.to_bytes(), addr)
+            # 3. Handle Teardown (FIN)
+            elif state == 1 and pkt.is_fin:
+                print("Received FIN. Closing connection.")
+                outfile.close()
 
-                fin_pkt = TCPPacket(seq_num=server_seq, ack_num=expected_seq, flags=17)
-                sock.sendto(fin_pkt.to_bytes(), addr)
+                expected_seq = pkt.seq + 1
+
+                # Send ACK for the FIN
+                ack = TCPPacket(server_seq, expected_seq, 16)
+                sock.sendto(ack.pack(), addr)
+
+                # Send our own FIN
+                fin = TCPPacket(server_seq, expected_seq, 17)  # FIN|ACK
+                sock.sendto(fin.pack(), addr)
+                server_seq += 1
                 state = 2
 
-            elif state == 2 and packet.is_ack:
-                print(" -> CLOSED.")
+            # Final ACK wait
+            elif state == 2 and pkt.is_ack:
+                print("Connection closed cleanly.")
+                # Reset for next client? Or just exit.
+                # For this assignment, we can probably just exit or reset.
                 state = 0
                 server_seq = 200
-                output_file = open("received.bin", "wb")
+                # Re-open file for next run if needed, or just break
+                break
 
         except Exception as e:
             print(f"Error: {e}")
+            break
+
+    sock.close()
 
 
 if __name__ == "__main__":
-    run_receiver()
+    main()
