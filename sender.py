@@ -10,21 +10,22 @@ def run_sender():
     target_port = 8080
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    # Short timeout allows us to check for ACKs frequently without blocking sending
-    sock.settimeout(0.1)
+    # Socket timeout must be much smaller than the GBN timeout
+    # to allow the loop to constantly check the timer status.
+    sock.settimeout(0.05)
 
-    # Constants
+    # --- CONSTANTS ---
     MSS = 1024
-    WINDOW_SIZE = 4 * MSS  # 4 KB Window
+    WINDOW_SIZE = 4 * MSS
+    GBN_TIMEOUT = 1.5  # 1,500 ms as requested
 
-    # Initial Sequence Numbers
+    # Sequence Numbers
     client_seq = 100
     server_response_seq = 0
 
-    # --- 1. HANDSHAKE (Standard) ---
+    # --- 1. HANDSHAKE ---
     handshake_done = False
     print(f"--- Starting 3-Way Handshake ---")
-
     while not handshake_done:
         try:
             syn_pkt = TCPPacket(seq_num=client_seq, ack_num=0, flags=2)
@@ -43,84 +44,113 @@ def run_sender():
         except socket.timeout:
             print("Timeout (Handshake). Retrying...")
 
-    # --- 2. DATA TRANSFER (SLIDING WINDOW) ---
+    # --- 2. DATA TRANSFER (Go-Back-N) ---
     filename = "tosend.bin"
     if not os.path.exists(filename):
-        print(f"Error: {filename} not found.")
-        return
+        # Create a dummy file if it doesn't exist
+        with open(filename, "wb") as f:
+            f.write(os.urandom(50000))
+        print(f"Created {filename} with random data.")
 
-    # Read entire file into memory
     with open(filename, "rb") as f:
         file_data = f.read()
 
     total_bytes = len(file_data)
     print(f"\n--- Sending file: {filename} ({total_bytes} bytes) ---")
 
-    # State Variables
-    # send_base: The oldest unacknowledged sequence number
-    # next_seq_num: The sequence number of the next packet to be sent
     base_seq_initial = client_seq
     send_base = client_seq
     next_seq_num = client_seq
 
-    # Loop until all data is ACKed
+    timer_start_time = None
+
     while send_base < (base_seq_initial + total_bytes):
 
         # A. SEND LOOP: Fill the window
-        # While we have room in the window AND valid data to send
         while (next_seq_num < send_base + WINDOW_SIZE) and (
             next_seq_num < base_seq_initial + total_bytes
         ):
 
-            # Calculate offset in the file
             offset = next_seq_num - base_seq_initial
-
-            # Slice the data (up to MSS)
             chunk = file_data[offset : offset + MSS]
 
-            # Create Packet
             pkt = TCPPacket(
                 seq_num=next_seq_num, ack_num=server_response_seq, flags=0, data=chunk
             )
-
             sock.sendto(pkt.to_bytes(), (target_ip, target_port))
-            print(f"Sent Seq={next_seq_num} Len={len(chunk)}")
 
-            # Advance next_seq_num
+            # Start timer if send_base is sent (i.e., this is the oldest unacked packet)
+            if send_base == next_seq_num:
+                timer_start_time = time.time()
+
             next_seq_num += len(chunk)
 
-        # B. RECEIVE LOOP: Process ACKs
-        # We try to receive ACKs. If we get one, we slide send_base.
-        # If we time out, we loop back (and potentially retransmit later, but for Step 5 no loss assumed)
+        # B. RECEIVE ACKS
         try:
             data, addr = sock.recvfrom(1024)
             ack_pkt = TCPPacket.from_bytes(data)
 
             if ack_pkt.is_ack:
-                # Cumulative ACK check
+                # GBN Cumulative ACK Logic
                 if ack_pkt.ack_num > send_base:
-                    print(f"Got ACK={ack_pkt.ack_num}. Sliding Window.")
+                    # Slide window
                     send_base = ack_pkt.ack_num
 
+                    if send_base == next_seq_num:
+                        # Window is empty (all acked)
+                        timer_start_time = None
+                    else:
+                        # Window not empty, restart timer for the NEW oldest unacked
+                        timer_start_time = time.time()
+
         except socket.timeout:
-            # No ACK received recently, just loop back
+            # Just socket silence, move to timer check
             pass
+
+        # C. TIMEOUT & RETRANSMISSION
+        if timer_start_time is not None:
+            time_elapsed = time.time() - timer_start_time
+
+            if time_elapsed > GBN_TIMEOUT:
+                print(f"[TIMEOUT] No ACK for {send_base}. Retransmitting Window...")
+
+                # Restart Timer immediately
+                timer_start_time = time.time()
+
+                # Retransmit Loop: Resend from send_base up to next_seq_num
+                retransmit_seq = send_base
+                while retransmit_seq < next_seq_num:
+                    offset = retransmit_seq - base_seq_initial
+                    chunk = file_data[offset : offset + MSS]
+
+                    pkt = TCPPacket(
+                        seq_num=retransmit_seq,
+                        ack_num=server_response_seq,
+                        flags=0,
+                        data=chunk,
+                    )
+
+                    sock.sendto(pkt.to_bytes(), (target_ip, target_port))
+                    # print(f" -> Resent {retransmit_seq}")
+
+                    retransmit_seq += len(chunk)
 
     print(f"File sending complete.")
 
-    # --- 3. TEARDOWN (Modified sequence numbers) ---
-    print("\n--- Initiating Connection Teardown ---")
-    # Update client_seq to match where we left off
+    # --- 3. TEARDOWN ---
+    print("\n--- Initiating Teardown ---")
     client_seq = send_base
-
     fin_acked = False
-    while not fin_acked:
+    attempts = 0
+    while not fin_acked and attempts < 10:
         try:
             fin_pkt = TCPPacket(
                 seq_num=client_seq, ack_num=server_response_seq, flags=1
             )
             sock.sendto(fin_pkt.to_bytes(), (target_ip, target_port))
 
+            # Wait longer for FIN ACK
+            sock.settimeout(1.0)
             data, addr = sock.recvfrom(1024)
             resp = TCPPacket.from_bytes(data)
 
@@ -136,6 +166,7 @@ def run_sender():
                 print("Sent Final ACK. CLOSED.")
 
         except socket.timeout:
+            attempts += 1
             print("Timeout waiting for FIN-ACK.")
 
     sock.close()
