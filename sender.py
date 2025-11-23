@@ -8,7 +8,7 @@ def run_sender():
     target_ip = sys.argv[1] if len(sys.argv) > 1 else "10.0.0.2"
     target_port = 8080
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(2.0)  # 2s timeout (just above RTT)
+    sock.settimeout(4.0)  # 2s timeout (just above RTT)
 
     # Initial Sequence Number
     client_seq = 100
